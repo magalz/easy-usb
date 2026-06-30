@@ -25,8 +25,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Set platform excludes
+        id: ex
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            echo "flags=--exclude easy-usb-adapter-vci" >> $GITHUB_OUTPUT
+          else
+            echo "flags=--exclude easy-usb-adapter-linux" >> $GITHUB_OUTPUT
+          fi
+
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings -W clippy::disallowed_methods
+        run: cargo clippy --workspace ${{ steps.ex.outputs.flags }} -- -D warnings -W clippy::disallowed_methods
 
   test:
     strategy:
@@ -42,8 +52,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Set platform excludes
+        id: ex
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            echo "flags=--exclude easy-usb-adapter-vci" >> $GITHUB_OUTPUT
+          else
+            echo "flags=--exclude easy-usb-adapter-linux" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace ${{ steps.ex.outputs.flags }}
 
   audit:
     runs-on: ubuntu-latest
@@ -78,7 +98,7 @@ jobs:
         run: cargo install --locked cargo-llvm-cov
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude easy-usb-adapter-vci --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
