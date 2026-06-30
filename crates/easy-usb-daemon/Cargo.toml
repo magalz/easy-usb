@@ -1,0 +1,38 @@
+[package]
+name = "easy-usb-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+easy-usb-core = { path = "../easy-usb-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = []
+vci = ["easy-usb-adapter-vci"]
+linux = ["easy-usb-adapter-linux"]
+android = ["easy-usb-adapter-android"]
+mdns = ["easy-usb-adapter-mdns"]
+
+[dependencies.easy-usb-adapter-vci]
+path = "../easy-usb-adapter-vci"
+optional = true
+
+[dependencies.easy-usb-adapter-linux]
+path = "../easy-usb-adapter-linux"
+optional = true
+
+[dependencies.easy-usb-adapter-android]
+path = "../easy-usb-adapter-android"
+optional = true
+
+[dependencies.easy-usb-adapter-mdns]
+path = "../easy-usb-adapter-mdns"
+optional = true

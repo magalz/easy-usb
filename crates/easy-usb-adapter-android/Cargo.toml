@@ -1,0 +1,11 @@
+[package]
+name = "easy-usb-adapter-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+easy-usb-core = { path = "../easy-usb-core" }
+jni = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,27 @@
+# BMAD
+_bmad/
+_bmad-config/
+_bmad-output/
+.agents/
+.opencode/
+.memtrace/
+.memdb/
+.agent/
+
+# Rust
+/target
+
+# IDE
+.vscode/
+.idea/
+*.rs.bk
+
+# OS generated
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.swn
+
+# Secrets
+.env*
