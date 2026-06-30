@@ -13,11 +13,13 @@ During development or code review, whenever you identify:
 **ALWAYS create a GitHub issue** in `easy-usb/easy-usb` with:
 
 - Title prefixed with `[debt]` or `[deferred]`
-- Body describing the finding, where it was found (file/line), and suggested fix
+- Body describing each finding, where it was found (file/line), and suggested fix
 - Label: `tech-debt` or `deferred`
 - Link to the story/PR that surfaced it
 
-Do NOT rely on inline comments or story notes alone — issues persist and are trackable.
+**One issue per session/code-review**, not one per finding. Batch all deferred items from the same review into a single issue with sections per item.
+
+**Encoding:** When creating GitHub issues via CLI, use `--body-file` with a UTF-8 file to avoid backtick/code-format mangling. Do NOT pass multi-line bodies via `--body` in PowerShell.
 
 ## Rust Conventions
 
