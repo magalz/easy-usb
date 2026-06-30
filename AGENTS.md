@@ -19,7 +19,7 @@ During development or code review, whenever you identify:
 
 **One issue per session/code-review**, not one per finding. Batch all deferred items from the same review into a single issue with sections per item.
 
-**Encoding:** When creating GitHub issues via CLI, use `--body-file` with a UTF-8 file to avoid backtick/code-format mangling. Do NOT pass multi-line bodies via `--body` in PowerShell.
+**Encoding:** When creating GitHub issues via CLI, always use `[System.IO.File]::WriteAllText($path, $body, [System.Text.UTF8Encoding]::new($false))` to write a UTF-8 file (no BOM), then pass it with `--body-file`. Do NOT pass multi-line bodies via `--body` in PowerShell — backticks and special chars will get mangled.
 
 ## Rust Conventions
 
