@@ -29,6 +29,9 @@ pub enum ProtocolError {
 
     #[error("encoding error: {0}")]
     EncodingError(String),
+
+    #[error("I/O error: {0}")]
+    IoError(String),
 }
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 1_048_576;
@@ -841,5 +844,14 @@ mod tests {
 
         let result = encode_header(&header, None);
         assert!(matches!(result, Err(ProtocolError::IsochronousNotSupported)));
+    }
+
+    #[test]
+    fn io_error_partial_eq_and_display() {
+        let err = ProtocolError::IoError("connection reset".into());
+        assert_eq!(err.to_string(), "I/O error: connection reset");
+        assert_eq!(err, ProtocolError::IoError("connection reset".into()));
+        assert_ne!(err, ProtocolError::EncodingError("different".into()));
+        assert_ne!(err, ProtocolError::IsochronousNotSupported);
     }
 }

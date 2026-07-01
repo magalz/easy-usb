@@ -3,19 +3,19 @@ use std::net::IpAddr;
 use crate::protocol::UsbDeviceDescriptor;
 use crate::protocol::UsbDeviceSpeed;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignalMode {
     Eager,
     Confirmed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UsbEvent {
-    Connected(UsbDevice),
+    Connected { device: UsbDevice },
     Disconnected { busid: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsbDevice {
     pub busid: String,
     pub vid: u16,

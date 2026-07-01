@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -7,8 +8,49 @@ use tokio::task::JoinHandle;
 
 use crate::port::types::UsbDevice;
 
-pub type SessionId = String;
-pub type BusId = String;
+pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(pub String);
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        SessionId(s.to_string())
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        SessionId(s)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BusId(pub String);
+
+impl std::fmt::Display for BusId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<&str> for BusId {
+    fn from(s: &str) -> Self {
+        BusId(s.to_string())
+    }
+}
+
+impl From<String> for BusId {
+    fn from(s: String) -> Self {
+        BusId(s)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceState {
@@ -41,54 +83,47 @@ pub enum RegistryCommand {
 pub enum RegistryError {
     #[error("channel closed")]
     ChannelClosed,
-    #[error("device not found: {busid}")]
-    DeviceNotFound { busid: BusId },
-    #[error("invalid transition from {from:?} to {to:?} for {busid}")]
-    InvalidTransition {
-        busid: BusId,
-        from: DeviceState,
-        to: DeviceState,
-    },
 }
 
 #[derive(Clone)]
 pub struct RegistryHandle {
-    tx: mpsc::UnboundedSender<RegistryCommand>,
+    tx: mpsc::Sender<RegistryCommand>,
 }
 
 impl RegistryHandle {
-    pub fn send(&self, cmd: RegistryCommand) -> Result<(), RegistryError> {
-        self.tx.send(cmd).map_err(|_| RegistryError::ChannelClosed)
+    pub async fn send(&self, cmd: RegistryCommand) -> Result<(), RegistryError> {
+        self.tx.send(cmd).await.map_err(|_| RegistryError::ChannelClosed)
     }
 }
 
 pub struct DeviceRegistry {
     handle: RegistryHandle,
-    watch_tx: watch::Sender<RegistrySnapshot>,
+    watch_tx: watch::Sender<Arc<RegistrySnapshot>>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     _task: JoinHandle<()>,
-}
-
-impl Default for DeviceRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl DeviceRegistry {
     pub fn new() -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (watch_tx, _) = watch::channel(RegistrySnapshot::default());
+        Self::with_capacity(DEFAULT_CHANNEL_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel(capacity);
+        let (watch_tx, _) = watch::channel(Arc::new(RegistrySnapshot::default()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let handle = RegistryHandle { tx: cmd_tx };
         let watch_tx_clone = watch_tx.clone();
 
         let task = tokio::spawn(async move {
-            run_registry(cmd_rx, watch_tx_clone).await;
+            run_registry(cmd_rx, watch_tx_clone, shutdown_rx).await;
         });
 
         DeviceRegistry {
             handle,
             watch_tx,
+            shutdown_tx: Some(shutdown_tx),
             _task: task,
         }
     }
@@ -97,78 +132,87 @@ impl DeviceRegistry {
         &self.handle
     }
 
-    pub fn snapshot(&self) -> watch::Receiver<RegistrySnapshot> {
+    pub fn snapshot(&self) -> watch::Receiver<Arc<RegistrySnapshot>> {
         self.watch_tx.subscribe()
+    }
+
+    pub async fn shutdown(mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut self._task).await;
+    }
+}
+
+impl Default for DeviceRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Drop for DeviceRegistry {
     fn drop(&mut self) {
-        self._task.abort();
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
     }
 }
 
-async fn run_registry(mut cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>, snap_tx: watch::Sender<RegistrySnapshot>) {
+async fn run_registry(
+    mut cmd_rx: mpsc::Receiver<RegistryCommand>,
+    snap_tx: watch::Sender<Arc<RegistrySnapshot>>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let mut state = RegistrySnapshot::default();
 
-    while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
-            RegistryCommand::AddDevice(device) => {
-                let busid = device.busid.clone();
-                use std::collections::hash_map::Entry;
-                match state.devices.entry(busid) {
-                    Entry::Occupied(mut entry) => {
-                        if entry.get().state == DeviceState::Disconnected {
-                            tracing::info!("device re-added: {}", entry.key());
-                            entry.insert(DeviceEntry {
-                                device,
-                                state: DeviceState::Idle,
-                            });
-                        } else {
-                            tracing::warn!("duplicate AddDevice for busid {}, skipping", entry.key());
-                            continue;
-                        }
-                    }
-                    Entry::Vacant(entry) => {
-                        let busid = entry.key().clone();
-                        tracing::info!("device added: {busid}");
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else {
+                    break;
+                };
+                handle_command(cmd, &mut state);
+                let _ = snap_tx.send(Arc::new(state.clone()));
+            }
+            _ = &mut shutdown_rx => {
+                tracing::info!("registry shutting down gracefully");
+                break;
+            }
+        }
+    }
+}
+
+fn handle_command(cmd: RegistryCommand, state: &mut RegistrySnapshot) {
+    match cmd {
+        RegistryCommand::AddDevice(device) => {
+            let busid = BusId(device.busid.clone());
+            use std::collections::hash_map::Entry;
+            match state.devices.entry(busid) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().state == DeviceState::Disconnected {
+                        tracing::info!("device re-added: {:?}", entry.key());
                         entry.insert(DeviceEntry {
                             device,
                             state: DeviceState::Idle,
                         });
+                    } else {
+                        tracing::warn!("duplicate AddDevice for busid {:?}, skipping", entry.key());
                     }
                 }
-            }
-            RegistryCommand::RemoveDevice(busid) => {
-                if let Some(entry) = state.devices.remove(&busid) {
-                    tracing::info!("device removed: {busid}");
-                    if let DeviceState::Forwarded(ref sid) = entry.state
-                        && let Some(buses) = state.forwardings.get_mut(sid)
-                    {
-                        buses.retain(|b| *b != busid);
-                        if buses.is_empty() {
-                            state.forwardings.remove(sid);
-                        }
-                    }
-                } else {
-                    tracing::warn!("RemoveDevice for unknown busid {busid}, ignoring");
-                    continue;
+                Entry::Vacant(entry) => {
+                    let busid_str = entry.key().0.clone();
+                    tracing::info!("device added: {busid_str}");
+                    entry.insert(DeviceEntry {
+                        device,
+                        state: DeviceState::Idle,
+                    });
                 }
             }
-            RegistryCommand::TransitionState(busid, new_state) => {
-                let Some(entry) = state.devices.get_mut(&busid) else {
-                    tracing::warn!("TransitionState for unknown busid {busid}, ignoring");
-                    continue;
-                };
-
-                let old_state = entry.state.clone();
-                if !is_valid_transition(&old_state, &new_state) {
-                    tracing::warn!("invalid transition for {busid}: {old_state:?} -> {new_state:?}, ignoring");
-                    continue;
-                }
-
-                // Remove from old forwardings if leaving Forwarded state
-                if let DeviceState::Forwarded(ref sid) = old_state
+        }
+        RegistryCommand::RemoveDevice(busid) => {
+            if let Some(entry) = state.devices.remove(&busid) {
+                tracing::info!("device removed: {:?}", busid);
+                if let DeviceState::Forwarded(ref sid) = entry.state
                     && let Some(buses) = state.forwardings.get_mut(sid)
                 {
                     buses.retain(|b| *b != busid);
@@ -176,21 +220,46 @@ async fn run_registry(mut cmd_rx: mpsc::UnboundedReceiver<RegistryCommand>, snap
                         state.forwardings.remove(sid);
                     }
                 }
-
-                // Add to new forwardings if entering Forwarded state (defensive: no duplicates)
-                if let DeviceState::Forwarded(ref sid) = new_state {
-                    let buses = state.forwardings.entry(sid.clone()).or_default();
-                    if !buses.contains(&busid) {
-                        buses.push(busid.clone());
-                    }
-                }
-
-                entry.state = new_state;
-                tracing::info!("device {busid} transitioned to {:?}", entry.state);
+            } else {
+                tracing::warn!("RemoveDevice for unknown busid {:?}, ignoring", busid);
             }
         }
+        RegistryCommand::TransitionState(busid, new_state) => {
+            let Some(entry) = state.devices.get_mut(&busid) else {
+                tracing::warn!("TransitionState for unknown busid {:?}, ignoring", busid);
+                return;
+            };
 
-        let _ = snap_tx.send(state.clone());
+            let old_state = entry.state.clone();
+            if !is_valid_transition(&old_state, &new_state) {
+                tracing::warn!(
+                    "invalid transition for {:?}: {:?} -> {:?}, ignoring",
+                    busid,
+                    old_state,
+                    new_state
+                );
+                return;
+            }
+
+            if let DeviceState::Forwarded(ref sid) = old_state
+                && let Some(buses) = state.forwardings.get_mut(sid)
+            {
+                buses.retain(|b| *b != busid);
+                if buses.is_empty() {
+                    state.forwardings.remove(sid);
+                }
+            }
+
+            if let DeviceState::Forwarded(ref sid) = new_state {
+                let buses = state.forwardings.entry(sid.clone()).or_default();
+                if !buses.contains(&busid) {
+                    buses.push(busid.clone());
+                }
+            }
+
+            entry.state = new_state;
+            tracing::info!("device {:?} transitioned to {:?}", busid, entry.state);
+        }
     }
 }
 
@@ -211,7 +280,7 @@ fn is_valid_transition(from: &DeviceState, to: &DeviceState) -> bool {
 #[cfg(test)]
 mod tests {
     use tokio::sync::watch;
-    use tokio::time::Duration;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::port::types::UsbDevice;
@@ -234,12 +303,12 @@ mod tests {
     }
 
     async fn wait_for(
-        rx: &mut watch::Receiver<RegistrySnapshot>,
+        rx: &mut watch::Receiver<Arc<RegistrySnapshot>>,
         predicate: impl Fn(&RegistrySnapshot) -> bool,
     ) -> bool {
-        tokio::time::timeout(Duration::from_secs(2), async {
+        timeout(Duration::from_secs(2), async {
             loop {
-                if predicate(&*rx.borrow_and_update()) {
+                if predicate(&rx.borrow_and_update()) {
                     return true;
                 }
                 if rx.changed().await.is_err() {
@@ -249,6 +318,14 @@ mod tests {
         })
         .await
         .unwrap_or(false)
+    }
+
+    fn busid(s: &str) -> BusId {
+        BusId(s.to_string())
+    }
+
+    fn session_id(s: &str) -> SessionId {
+        SessionId(s.to_string())
     }
 
     #[tokio::test]
@@ -266,13 +343,17 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev.clone())).unwrap();
+        registry
+            .handle()
+            .send(RegistryCommand::AddDevice(dev.clone()))
+            .await
+            .unwrap();
 
-        let found = wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found, "device should appear in snapshot");
 
         let snap = rx.borrow();
-        let entry = snap.devices.get("1-1").unwrap();
+        let entry = snap.devices.get(&busid("1-1")).unwrap();
         assert_eq!(entry.device.busid, "1-1");
         assert_eq!(entry.device.vid, 0x1234);
         assert_eq!(entry.device.pid, 0x5678);
@@ -286,16 +367,16 @@ mod tests {
         let dev1 = make_device("1-1", 0x1234, 0x5678);
         let dev2 = make_device("1-1", 0xAAAA, 0xBBBB);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev1)).unwrap();
-        let found = wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev1)).await.unwrap();
+        let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev2)).unwrap();
+        registry.handle().send(RegistryCommand::AddDevice(dev2)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let snap = rx.borrow();
         assert_eq!(snap.devices.len(), 1);
-        let entry = snap.devices.get("1-1").unwrap();
+        let entry = snap.devices.get(&busid("1-1")).unwrap();
         assert_eq!(entry.device.vid, 0x1234, "original device should be kept");
     }
 
@@ -305,15 +386,16 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        let found = wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found);
 
         registry
             .handle()
-            .send(RegistryCommand::RemoveDevice("1-1".to_string()))
+            .send(RegistryCommand::RemoveDevice(busid("1-1")))
+            .await
             .unwrap();
-        let removed = wait_for(&mut rx, |s| !s.devices.contains_key("1-1")).await;
+        let removed = wait_for(&mut rx, |s| !s.devices.contains_key(&busid("1-1"))).await;
         assert!(removed, "device should be removed from snapshot");
 
         let snap = rx.borrow();
@@ -325,9 +407,9 @@ mod tests {
         let registry = DeviceRegistry::new();
         let result = registry
             .handle()
-            .send(RegistryCommand::RemoveDevice("nonexistent".to_string()));
+            .send(RegistryCommand::RemoveDevice(busid("nonexistent")));
         assert!(
-            result.is_ok(),
+            result.await.is_ok(),
             "sending remove for unknown device should not error on send"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -339,17 +421,20 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        let found = wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found);
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
 
         let transitioned = wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
         assert!(transitioned, "device should transition to Bound");
@@ -361,40 +446,41 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
             ))
+            .await
             .unwrap();
 
         let forwarded = wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
         })
         .await;
         assert!(forwarded, "device should be Forwarded(s1)");
 
         let snap = rx.borrow();
-        let fwd = snap.forwardings.get("s1").unwrap();
-        assert!(
-            fwd.contains(&"1-1".to_string()),
-            "forwardings[s1] should contain busid 1-1"
-        );
+        let fwd = snap.forwardings.get(&session_id("s1")).unwrap();
+        assert!(fwd.contains(&busid("1-1")), "forwardings[s1] should contain busid 1-1");
     }
 
     #[tokio::test]
@@ -403,39 +489,46 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
             ))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
         })
         .await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Idle))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Idle))
+            .await
             .unwrap();
 
         let back_to_idle = wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Idle)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Idle)
         })
         .await;
         assert!(back_to_idle, "device should return to Idle");
@@ -443,9 +536,9 @@ mod tests {
         let snap = rx.borrow();
         let fwd_empty = snap
             .forwardings
-            .get("s1")
-            .is_none_or(|buses| !buses.contains(&"1-1".to_string()));
-        assert!(fwd_empty, "forwardings[s1] should no longer contain 1-1");
+            .get(&session_id("s1"))
+            .is_none_or(|buses| buses.is_empty());
+        assert!(fwd_empty, "forwardings for s1 should be empty");
     }
 
     #[tokio::test]
@@ -454,47 +547,54 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
-        // Idle -> Bound
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
-            .unwrap();
-        wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
-        })
-        .await;
-
-        // Bound -> Forwarded("s1")
-        registry
-            .handle()
-            .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
-            ))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
-        // Forwarded("s1") -> Idle
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Idle))
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
+            ))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Idle)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
+        })
+        .await;
+
+        registry
+            .handle()
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Idle))
+            .await
+            .unwrap();
+        wait_for(&mut rx, |s| {
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Idle)
         })
         .await;
 
         let snap = rx.borrow();
-        let fwd_empty = snap.forwardings.get("s1").is_none_or(|buses| buses.is_empty());
-        assert!(fwd_empty, "forwardings should be empty after full cycle");
+        let fwd_empty = snap
+            .forwardings
+            .get(&session_id("s1"))
+            .is_none_or(|buses| buses.is_empty());
+        assert!(fwd_empty, "forwardings should be cleaned up after cycle");
     }
 
     #[tokio::test]
@@ -503,22 +603,22 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
-        // Idle -> Forwarded (invalid, must go through Bound first)
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
             ))
+            .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let snap = rx.borrow();
-        let entry = snap.devices.get("1-1").unwrap();
+        let entry = snap.devices.get(&busid("1-1")).unwrap();
         assert_eq!(
             entry.state,
             DeviceState::Idle,
@@ -530,10 +630,10 @@ mod tests {
     async fn unknown_device_transition_no_panic() {
         let registry = DeviceRegistry::new();
         let result = registry.handle().send(RegistryCommand::TransitionState(
-            "nonexistent".to_string(),
+            busid("nonexistent"),
             DeviceState::Bound,
         ));
-        assert!(result.is_ok(), "send should not error");
+        assert!(result.await.is_ok(), "send should not error");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -548,11 +648,15 @@ mod tests {
             let h = handle.clone();
             join_handles.push(tokio::spawn(async move {
                 for j in 0..10 {
-                    let busid = format!("{}-{}", i, j);
-                    let dev = make_device(&busid, 0x1000 + i as u16, 0x2000 + j as u16);
-                    let _ = h.send(RegistryCommand::AddDevice(dev));
-                    let _ = h.send(RegistryCommand::TransitionState(busid.clone(), DeviceState::Bound));
-                    let _ = h.send(RegistryCommand::TransitionState(busid, DeviceState::Idle));
+                    let busid_str = format!("{}-{}", i, j);
+                    let dev = make_device(&busid_str, 0x1000 + i as u16, 0x2000 + j as u16);
+                    let _ = h.send(RegistryCommand::AddDevice(dev)).await;
+                    let _ = h
+                        .send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Bound))
+                        .await;
+                    let _ = h
+                        .send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Idle))
+                        .await;
                 }
             }));
         }
@@ -583,8 +687,8 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        let found = wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found, "device should appear in snapshot");
 
         let rx1 = registry.snapshot();
@@ -596,8 +700,8 @@ mod tests {
         assert_eq!(snap1.devices.len(), 1);
         assert_eq!(snap2.devices.len(), 1);
         assert_eq!(
-            snap1.devices.get("1-1").unwrap().device.vid,
-            snap2.devices.get("1-1").unwrap().device.vid
+            snap1.devices.get(&busid("1-1")).unwrap().device.vid,
+            snap2.devices.get(&busid("1-1")).unwrap().device.vid
         );
     }
 
@@ -612,15 +716,15 @@ mod tests {
 
         let t1 = tokio::spawn(async move {
             let dev = make_device("1-1", 0x1111, 0x1111);
-            h1.send(RegistryCommand::AddDevice(dev)).unwrap();
+            h1.send(RegistryCommand::AddDevice(dev)).await.unwrap();
         });
         let t2 = tokio::spawn(async move {
             let dev = make_device("2-2", 0x2222, 0x2222);
-            h2.send(RegistryCommand::AddDevice(dev)).unwrap();
+            h2.send(RegistryCommand::AddDevice(dev)).await.unwrap();
         });
         let t3 = tokio::spawn(async move {
             let dev = make_device("3-3", 0x3333, 0x3333);
-            h3.send(RegistryCommand::AddDevice(dev)).unwrap();
+            h3.send(RegistryCommand::AddDevice(dev)).await.unwrap();
         });
 
         t1.await.unwrap();
@@ -628,7 +732,9 @@ mod tests {
         t3.await.unwrap();
 
         let all_present = wait_for(&mut rx, |s| {
-            s.devices.contains_key("1-1") && s.devices.contains_key("2-2") && s.devices.contains_key("3-3")
+            s.devices.contains_key(&busid("1-1"))
+                && s.devices.contains_key(&busid("2-2"))
+                && s.devices.contains_key(&busid("3-3"))
         })
         .await;
         assert!(
@@ -643,54 +749,60 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
-            .unwrap();
-        wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
-        })
-        .await;
-
-        registry
-            .handle()
-            .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
-            ))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
+            ))
+            .await
+            .unwrap();
+        wait_for(&mut rx, |s| {
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
+        })
+        .await;
+
+        registry
+            .handle()
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
                 DeviceState::Disconnected,
             ))
+            .await
             .unwrap();
 
         let disconnected = wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
+                .get(&busid("1-1"))
                 .is_some_and(|e| e.state == DeviceState::Disconnected)
         })
         .await;
         assert!(disconnected, "device should be Disconnected");
 
         let snap = rx.borrow();
-        let not_in_fwd = snap
-            .forwardings
-            .get("s1")
-            .is_none_or(|buses| !buses.contains(&"1-1".to_string()));
-        assert!(not_in_fwd, "disconnected device should be removed from forwardings[s1]");
+        assert!(
+            snap.forwardings
+                .get(&session_id("s1"))
+                .is_none_or(|buses| buses.is_empty()),
+            "s1 should be removed from forwardings after disconnect"
+        );
     }
 
     #[tokio::test]
@@ -702,7 +814,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let dev = make_device("1-1", 0x1234, 0x5678);
-        let result = handle.send(RegistryCommand::AddDevice(dev));
+        let result = handle.send(RegistryCommand::AddDevice(dev)).await;
         assert!(
             matches!(result, Err(RegistryError::ChannelClosed)),
             "send after registry drop should return ChannelClosed, got {result:?}"
@@ -715,49 +827,51 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
             ))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
         })
         .await;
 
         registry
             .handle()
-            .send(RegistryCommand::RemoveDevice("1-1".to_string()))
+            .send(RegistryCommand::RemoveDevice(busid("1-1")))
+            .await
             .unwrap();
 
-        let removed = wait_for(&mut rx, |s| !s.devices.contains_key("1-1")).await;
+        let removed = wait_for(&mut rx, |s| !s.devices.contains_key(&busid("1-1"))).await;
         assert!(removed, "device should be removed");
 
         let snap = rx.borrow();
         let not_in_fwd = snap
             .forwardings
-            .get("s1")
-            .is_none_or(|buses| !buses.contains(&"1-1".to_string()));
-        assert!(
-            not_in_fwd,
-            "removed forwarded device should be cleaned from forwardings[s1]"
-        );
+            .get(&session_id("s1"))
+            .is_none_or(|buses| !buses.contains(&busid("1-1")));
+        assert!(not_in_fwd, "device should be removed from forwardings");
     }
 
     #[tokio::test]
@@ -766,20 +880,21 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
+                busid("1-1"),
                 DeviceState::Disconnected,
             ))
+            .await
             .unwrap();
 
         let ok = wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
+                .get(&busid("1-1"))
                 .is_some_and(|e| e.state == DeviceState::Disconnected)
         })
         .await;
@@ -792,29 +907,33 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
+                busid("1-1"),
                 DeviceState::Disconnected,
             ))
+            .await
             .unwrap();
 
         let ok = wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
+                .get(&busid("1-1"))
                 .is_some_and(|e| e.state == DeviceState::Disconnected)
         })
         .await;
@@ -827,32 +946,34 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
+                busid("1-1"),
                 DeviceState::Disconnected,
             ))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
+                .get(&busid("1-1"))
                 .is_some_and(|e| e.state == DeviceState::Disconnected)
         })
         .await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Idle))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Idle))
+            .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let snap = rx.borrow();
         assert_eq!(
-            snap.devices.get("1-1").unwrap().state,
+            snap.devices.get(&busid("1-1")).unwrap().state,
             DeviceState::Disconnected,
             "state should remain Disconnected (terminal)"
         );
@@ -865,30 +986,33 @@ mod tests {
         let dev1 = make_device("1-1", 0x1111, 0x1111);
         let dev2 = make_device("2-2", 0x2222, 0x2222);
 
-        for (dev, busid) in [(dev1, "1-1"), (dev2, "2-2")] {
-            registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-            wait_for(&mut rx, |s| s.devices.contains_key(busid)).await;
+        for (dev, busid_str) in [(dev1, "1-1"), (dev2, "2-2")] {
+            let bid = busid(busid_str);
+            registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+            wait_for(&mut rx, |s| s.devices.contains_key(&bid)).await;
 
             registry
                 .handle()
-                .send(RegistryCommand::TransitionState(busid.to_string(), DeviceState::Bound))
+                .send(RegistryCommand::TransitionState(bid.clone(), DeviceState::Bound))
+                .await
                 .unwrap();
             wait_for(&mut rx, |s| {
-                s.devices.get(busid).is_some_and(|e| e.state == DeviceState::Bound)
+                s.devices.get(&bid).is_some_and(|e| e.state == DeviceState::Bound)
             })
             .await;
 
             registry
                 .handle()
                 .send(RegistryCommand::TransitionState(
-                    busid.to_string(),
-                    DeviceState::Forwarded("s1".to_string()),
+                    bid.clone(),
+                    DeviceState::Forwarded(session_id("s1")),
                 ))
+                .await
                 .unwrap();
             wait_for(&mut rx, |s| {
                 s.devices
-                    .get(busid)
-                    .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                    .get(&bid)
+                    .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
             })
             .await;
         }
@@ -896,23 +1020,25 @@ mod tests {
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
+                busid("1-1"),
                 DeviceState::Disconnected,
             ))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
+                .get(&busid("1-1"))
                 .is_some_and(|e| e.state == DeviceState::Disconnected)
         })
         .await;
 
         let snap = rx.borrow();
+        assert_eq!(snap.forwardings.get(&session_id("s1")).map(|b| b.len()), Some(1));
         assert!(
             snap.forwardings
-                .get("s1")
-                .is_some_and(|buses| !buses.contains(&"1-1".to_string()) && buses.contains(&"2-2".to_string())),
-            "after disconnecting 1-1, forwardings[s1] should still contain 2-2 but not 1-1"
+                .get(&session_id("s1"))
+                .is_some_and(|buses| buses.contains(&busid("2-2"))),
+            "2-2 should still be in forwardings"
         );
     }
 
@@ -922,27 +1048,31 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Idle))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Idle))
+            .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let snap = rx.borrow();
         assert_eq!(
-            snap.devices.get("1-1").unwrap().state,
+            snap.devices.get(&busid("1-1")).unwrap().state,
             DeviceState::Bound,
             "Bound -> Idle should be rejected"
         );
@@ -954,47 +1084,189 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev)).unwrap();
-        wait_for(&mut rx, |s| s.devices.contains_key("1-1")).await;
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState("1-1".to_string(), DeviceState::Bound))
-            .unwrap();
-        wait_for(&mut rx, |s| {
-            s.devices.get("1-1").is_some_and(|e| e.state == DeviceState::Bound)
-        })
-        .await;
-
-        registry
-            .handle()
-            .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s1".to_string()),
-            ))
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
             .unwrap();
         wait_for(&mut rx, |s| {
             s.devices
-                .get("1-1")
-                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == "s1"))
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
             .send(RegistryCommand::TransitionState(
-                "1-1".to_string(),
-                DeviceState::Forwarded("s2".to_string()),
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s1")),
             ))
+            .await
+            .unwrap();
+        wait_for(&mut rx, |s| {
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| matches!(&e.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")))
+        })
+        .await;
+
+        registry
+            .handle()
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Forwarded(session_id("s2")),
+            ))
+            .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let snap = rx.borrow();
-        let entry = snap.devices.get("1-1").unwrap();
+        let entry = snap.devices.get(&busid("1-1")).unwrap();
         assert!(
-            matches!(&entry.state, DeviceState::Forwarded(sid) if sid == "s1"),
-            "Forwarded(s1) -> Forwarded(s2) should be rejected, got {:?}",
-            entry.state
+            matches!(&entry.state, DeviceState::Forwarded(sid) if sid == &session_id("s1")),
+            "Forwarded(s1) -> Forwarded(s2) should be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_gracefully() {
+        let registry = DeviceRegistry::new();
+        let dev = make_device("1-1", 0x1234, 0x5678);
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn at_most_once_delivery_per_transition() {
+        let registry = DeviceRegistry::new();
+        let mut rx = registry.snapshot();
+        let dev = make_device("1-1", 0x1234, 0x5678);
+
+        registry.handle().send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
+
+        let mut transition_count = 0u32;
+        let mut snapshot_rx = registry.snapshot();
+
+        registry
+            .handle()
+            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Bound))
+            .await
+            .unwrap();
+
+        loop {
+            if timeout(Duration::from_secs(2), snapshot_rx.changed()).await.is_err() {
+                break;
+            }
+            transition_count += 1;
+            if snapshot_rx
+                .borrow()
+                .devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
+            {
+                break;
+            }
+        }
+
+        assert!(
+            transition_count > 0,
+            "at least one snapshot transition should be delivered"
+        );
+        assert!(
+            transition_count <= 3,
+            "should not receive excessive transitions for a single command, got {transition_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_channel_backpressure_prevents_unbounded_growth() {
+        let registry = DeviceRegistry::with_capacity(1);
+        let handle = registry.handle().clone();
+
+        let dev1 = make_device("1-1", 0x1234, 0x5678);
+        let dev2 = make_device("2-2", 0xAAAA, 0xBBBB);
+        let dev3 = make_device("3-3", 0xCCCC, 0xDDDD);
+
+        // Fill the single-slot buffer synchronously before consumer can drain
+        // tokio::sync::mpsc send().await blocks when full, providing backpressure
+        let t1 = handle.send(RegistryCommand::AddDevice(dev1)).await;
+        assert!(t1.is_ok(), "first send should succeed");
+
+        // Send blocks until consumer drains — spawn it so we can observe
+        let handle2 = handle.clone();
+        let jh = tokio::spawn(async move { handle2.send(RegistryCommand::AddDevice(dev2)).await });
+
+        // Consumer will drain the first item, unblocking the second send
+        let mut rx = registry.snapshot();
+        let both_present = wait_for(&mut rx, |s| s.devices.len() >= 2).await;
+        assert!(
+            both_present,
+            "both devices should be registered after backpressure resolves"
+        );
+
+        let t2_result = timeout(Duration::from_secs(2), jh).await.unwrap().unwrap();
+        assert!(t2_result.is_ok(), "second send should succeed after consumer drains");
+
+        // Third send — regular backpressure behavior
+        let t3 = handle.send(RegistryCommand::AddDevice(dev3)).await;
+        assert!(t3.is_ok(), "third send should succeed");
+    }
+
+    #[test]
+    fn session_id_hash_and_ord() {
+        let a = session_id("a");
+        let b = session_id("b");
+        let a2 = session_id("a");
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+        assert!(a < b);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&a2));
+        assert!(!set.contains(&b));
+    }
+
+    #[test]
+    fn bus_id_hash_and_ord() {
+        let a = busid("1-1");
+        let b = busid("2-2");
+        let a2 = busid("1-1");
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+        assert!(a < b);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&a2));
+        assert!(!set.contains(&b));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_pending_commands_before_stop() {
+        let registry = DeviceRegistry::with_capacity(8);
+        let handle = registry.handle().clone();
+
+        for i in 0..4 {
+            let busid_str = format!("{}-{}", i, i);
+            let dev = make_device(&busid_str, 0x1000 + i as u16, 0x2000 + i as u16);
+            handle.send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        }
+
+        registry.shutdown().await;
+
+        let result = handle
+            .send(RegistryCommand::AddDevice(make_device("99-99", 0x9999, 0x9999)))
+            .await;
+        assert!(matches!(result, Err(RegistryError::ChannelClosed)));
     }
 }

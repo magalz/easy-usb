@@ -51,7 +51,7 @@ impl MockUsbHost {
                 devices.push(device.clone());
             }
         }
-        self.inject_event(UsbEvent::Connected(device));
+        self.inject_event(UsbEvent::Connected { device });
     }
 
     pub fn inject_disconnect(&self, busid: &str) {

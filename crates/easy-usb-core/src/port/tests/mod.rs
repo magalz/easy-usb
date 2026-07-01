@@ -127,7 +127,7 @@ async fn mock_usb_host_watch_receives_connect_events() {
     assert_eq!(list.len(), 1);
 
     match event {
-        UsbEvent::Connected(d) => {
+        UsbEvent::Connected { device: d } => {
             assert_eq!(d.busid, "1-1");
             assert_eq!(d.vid, 0x1234);
             assert_eq!(d.pid, 0x5678);
@@ -171,7 +171,7 @@ async fn mock_usb_host_ad2b_at_most_once_no_duplicate_events() {
 
     while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
         match event {
-            UsbEvent::Connected(_) => connect_count += 1,
+            UsbEvent::Connected { .. } => connect_count += 1,
             UsbEvent::Disconnected { .. } => disconnect_count += 1,
         }
     }
@@ -193,7 +193,7 @@ async fn mock_usb_host_ad2b_connect_precedes_reference() {
         .unwrap()
         .unwrap();
 
-    assert!(matches!(event, UsbEvent::Connected(_)));
+    assert!(matches!(event, UsbEvent::Connected { .. }));
 
     let list = host.list().await.unwrap();
     assert_eq!(list.len(), 1);
@@ -403,7 +403,9 @@ fn domain_types_derive_debug_clone_eq() {
     let dev2 = dev.clone();
     assert_eq!(dev, dev2);
 
-    let event = UsbEvent::Connected(make_device("1-1", 1, 2));
+    let event = UsbEvent::Connected {
+        device: make_device("1-1", 1, 2),
+    };
     let event2 = event.clone();
     assert_eq!(event, event2);
 

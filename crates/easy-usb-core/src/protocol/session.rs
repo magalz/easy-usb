@@ -12,7 +12,7 @@ use crate::protocol::wire::{OpRepImport, UsbipHeader, UsbipHeaderBasic, UsbipHea
 
 const BASIC_HEADER_SIZE: usize = core::mem::size_of::<UsbipHeaderBasic>();
 const CMD_HEADER_SIZE: usize = core::mem::size_of::<UsbipHeaderCmdSubmit>();
-const DIRECTION_OFFSET: usize = 16;
+const DIRECTION_OFFSET: usize = 12;
 const TFL_OFFSET: usize = BASIC_HEADER_SIZE + 4;
 const NUM_PACKETS_OFFSET: usize = BASIC_HEADER_SIZE + 12;
 
@@ -57,9 +57,13 @@ impl TcpSession {
         &self.busid
     }
 
+    pub fn reply(&self) -> &OpRepImport {
+        &self._reply
+    }
+
     pub async fn send_header(&mut self, header: &UsbipHeader, payload: Option<&[u8]>) -> Result<(), ProtocolError> {
         if self.closed {
-            return Err(ProtocolError::EncodingError("session closed".into()));
+            return Err(ProtocolError::IoError("session closed".into()));
         }
         let mut header = *header;
         header.base.seqnum = self.next_seqnum;
@@ -69,13 +73,13 @@ impl TcpSession {
         self.stream
             .write_all(&buf)
             .await
-            .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+            .map_err(|e| ProtocolError::IoError(e.to_string()))?;
         Ok(())
     }
 
     pub async fn recv_header(&mut self) -> Result<(UsbipHeader, Option<Vec<u8>>), ProtocolError> {
         if self.closed {
-            return Err(ProtocolError::EncodingError("session closed".into()));
+            return Err(ProtocolError::IoError("session closed".into()));
         }
         self.recv_header_inner().await
     }
@@ -105,7 +109,7 @@ impl TcpSession {
         self.stream
             .read_exact(&mut buf)
             .await
-            .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+            .map_err(|e| ProtocolError::IoError(e.to_string()))?;
 
         let command = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
         let direction = u32::from_be_bytes([
@@ -162,7 +166,7 @@ impl TcpSession {
             self.stream
                 .read_exact(&mut payload)
                 .await
-                .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+                .map_err(|e| ProtocolError::IoError(e.to_string()))?;
             buf.extend_from_slice(&payload);
         }
 
@@ -273,6 +277,10 @@ mod tests {
 
         assert_eq!(session.devid(), 3);
         assert_eq!(session.busid(), "1-1.2.3");
+        assert_eq!(session.reply().status, 0);
+        assert_eq!(session.reply().busnum, 1);
+        assert_eq!(session.reply().devnum, 3);
+        assert_eq!(session.reply().speed, 3);
 
         server.await.unwrap();
         session.close().await;
