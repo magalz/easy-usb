@@ -55,6 +55,13 @@ fn make_op_rep_import_ok() -> OpRepImport {
     }
 }
 
+async fn ensure_usbipd_ready(usbipd_addr: SocketAddr) -> Result<(), String> {
+    if container_already_running() {
+        return Ok(());
+    }
+    wait_for_usbipd(usbipd_addr, Duration::from_secs(30)).await
+}
+
 async fn wait_for_usbipd(addr: SocketAddr, timeout: Duration) -> Result<(), String> {
     let start = std::time::Instant::now();
     loop {
@@ -121,7 +128,7 @@ async fn interop_client_against_reference_usbipd() {
 
     docker_compose_up().await.expect("docker compose up");
     let usbipd_addr: SocketAddr = ([127, 0, 0, 1], USBIPD_PORT).into();
-    wait_for_usbipd(usbipd_addr, Duration::from_secs(30))
+    ensure_usbipd_ready(usbipd_addr)
         .await
         .expect("usbipd should be ready");
 

@@ -2,6 +2,9 @@
 members = ["crates/*"]
 resolver = "2"
 
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"

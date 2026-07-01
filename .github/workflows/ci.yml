@@ -36,7 +36,7 @@ jobs:
           fi
 
       - name: Clippy
-        run: cargo clippy --workspace ${{ steps.ex.outputs.flags }} -- -D warnings -W clippy::disallowed_methods
+        run: cargo clippy --workspace ${{ steps.ex.outputs.flags }} -- -D warnings
 
   test:
     strategy:
@@ -97,6 +97,15 @@ jobs:
 
       - name: Set up Docker Compose
         run: docker compose -f docker/docker-compose.yml up --build -d
+
+      - name: Verify usbipd is listening
+        run: |
+          for i in $(seq 1 15); do
+            docker compose -f docker/docker-compose.yml exec -T usbipd ss -tlnp | grep -q 3240 && break
+            sleep 2
+          done
+          docker compose -f docker/docker-compose.yml exec -T usbipd ss -tlnp | grep 3240
+        timeout-minutes: 1
 
       - name: Run interop tests
         run: USBIP_DOCKER_INTEROP=1 EASY_USB_CONTAINER_READY=1 cargo test -p easy-usb-core --test interop -- --ignored --test-threads 1
