@@ -1,0 +1,43 @@
+# Configuração padrão de mercado para Codecov
+codecov:
+  require_ci_to_pass: yes # Aguarda o pipeline de testes (CI) passar antes de postar
+
+coverage:
+  precision: 2 # Precisão de duas casas decimais (ex: 85.25%)
+  round: down  # Arredonda para baixo para evitar falsos positivos de cobertura
+  range: "70..90" # Escala de cores: Vermelho (<70%), Amarelo (70-90%), Verde (>90%)
+
+  status:
+    # Cobertura Geral do Projeto (Project)
+    project:
+      default:
+        target: auto       # Compara com o branch principal (main/master)
+        threshold: 1%      # Margem de tolerância de 1% para flutuações pequenas
+        informational: true # Padrão de mercado: Não bloqueia o merge no Git por cobertura legada baixa
+    
+    # Cobertura do Código Novo (Patch)
+    patch:
+      default:
+        target: 80%         # Padrão de mercado: Pelo menos 80% do código novo deve ter testes
+        threshold: 0%       # Sem tolerância para código novo sem teste
+        informational: false # Padrão de mercado: Bloqueia o merge se o código novo não estiver testado
+
+# Configuração de comentários no Pull Request
+comment:
+  layout: "reach, diff, flags, files" # Exibe cobertura geral, diff de linhas, flags e lista de arquivos
+  behavior: default                    # Atualiza o mesmo comentário do robô a cada novo commit (evita spam)
+  require_changes: false               # Posta o comentário mesmo se a porcentagem não mudar
+  hide_project_coverage: false         # Garante que a cobertura global do projeto seja exibida na tabela
+
+# Arquivos e pastas a serem ignorados na métrica de cobertura
+ignore:
+  - "**/tests/**/*"
+  - "**/test_*.py"
+  - "**/migrations/**/*"
+  - "**/node_modules/**/*"
+  - "**/.venv/**/*"
+  - "**/venv/**/*"
+  - "**/build/**/*"
+  - "**/dist/**/*"
+  - "**/setup.py"
+  - "**/docker-compose*.yml"
