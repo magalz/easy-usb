@@ -1,0 +1,12 @@
+services:
+  usbipd:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.usbipd
+    privileged: true
+    ports:
+      - "3240:3240"
+    cap_add:
+      - SYS_MODULE
+    volumes:
+      - /lib/modules:/lib/modules:ro
