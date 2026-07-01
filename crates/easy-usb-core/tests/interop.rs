@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 
 const USBIPD_PORT: u16 = 3240;
-const DOCKER_COMPOSE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docker");
+const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 fn docker_available() -> bool {
     std::env::var("USBIP_DOCKER_INTEROP").map(|v| v == "1").unwrap_or(false)
@@ -67,7 +67,7 @@ async fn wait_for_usbipd(addr: SocketAddr, timeout: Duration) -> Result<(), Stri
 async fn docker_compose_up() -> Result<(), String> {
     let output = Command::new("docker")
         .args(["compose", "-f", "docker/docker-compose.yml", "up", "--build", "-d"])
-        .current_dir(DOCKER_COMPOSE_DIR)
+        .current_dir(WORKSPACE_ROOT)
         .output()
         .await
         .map_err(|e| format!("docker compose up failed: {e}"))?;
@@ -81,7 +81,7 @@ async fn docker_compose_up() -> Result<(), String> {
 async fn docker_compose_down() {
     let _ = Command::new("docker")
         .args(["compose", "-f", "docker/docker-compose.yml", "down", "-t", "5"])
-        .current_dir(DOCKER_COMPOSE_DIR)
+        .current_dir(WORKSPACE_ROOT)
         .output()
         .await;
 }
@@ -90,7 +90,7 @@ async fn docker_exec(args: &[&str]) -> Result<String, String> {
     let output = Command::new("docker")
         .args(["compose", "-f", "docker/docker-compose.yml", "exec", "-T", "usbipd"])
         .args(args)
-        .current_dir(DOCKER_COMPOSE_DIR)
+        .current_dir(WORKSPACE_ROOT)
         .output()
         .await
         .map_err(|e| format!("docker exec failed: {e}"))?;
