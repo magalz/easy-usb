@@ -1201,14 +1201,15 @@ mod tests {
 
         // Send blocks until consumer drains — spawn it so we can observe
         let handle2 = handle.clone();
-        let jh = tokio::spawn(async move {
-            handle2.send(RegistryCommand::AddDevice(dev2)).await
-        });
+        let jh = tokio::spawn(async move { handle2.send(RegistryCommand::AddDevice(dev2)).await });
 
         // Consumer will drain the first item, unblocking the second send
         let mut rx = registry.snapshot();
         let both_present = wait_for(&mut rx, |s| s.devices.len() >= 2).await;
-        assert!(both_present, "both devices should be registered after backpressure resolves");
+        assert!(
+            both_present,
+            "both devices should be registered after backpressure resolves"
+        );
 
         let t2_result = timeout(Duration::from_secs(2), jh).await.unwrap().unwrap();
         assert!(t2_result.is_ok(), "second send should succeed after consumer drains");
