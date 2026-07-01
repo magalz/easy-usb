@@ -91,6 +91,40 @@ pub union UsbipHeaderUnion {
     pub ret_unlink: UsbipHeaderRetUnlink,
 }
 
+impl UsbipHeader {
+    pub fn cmd_submit(&self) -> Option<&UsbipHeaderCmdSubmit> {
+        if self.base.command == constants::CMD_SUBMIT {
+            Some(unsafe { &self.u.cmd_submit })
+        } else {
+            None
+        }
+    }
+
+    pub fn ret_submit(&self) -> Option<&UsbipHeaderRetSubmit> {
+        if self.base.command == constants::RET_SUBMIT {
+            Some(unsafe { &self.u.ret_submit })
+        } else {
+            None
+        }
+    }
+
+    pub fn cmd_unlink(&self) -> Option<&UsbipHeaderCmdUnlink> {
+        if self.base.command == constants::CMD_UNLINK {
+            Some(unsafe { &self.u.cmd_unlink })
+        } else {
+            None
+        }
+    }
+
+    pub fn ret_unlink(&self) -> Option<&UsbipHeaderRetUnlink> {
+        if self.base.command == constants::RET_UNLINK {
+            Some(unsafe { &self.u.ret_unlink })
+        } else {
+            None
+        }
+    }
+}
+
 impl fmt::Debug for UsbipHeaderUnion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UsbipHeaderUnion").finish_non_exhaustive()

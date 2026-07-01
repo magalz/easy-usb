@@ -12,6 +12,9 @@ use crate::protocol::wire::{
     UsbipHeaderRetUnlink, UsbipHeaderUnion,
 };
 
+const DIRECTION_OFFSET: usize = 12;
+const TFL_OFFSET: usize = 20 + 4;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AcceptError {
     #[error("accept failed: {0}")]
@@ -53,7 +56,7 @@ pub async fn send_op_rep_import(stream: &mut TcpStream, rep: &OpRepImport) -> Re
     stream
         .write_all(&buf)
         .await
-        .map_err(|e| ProtocolError::EncodingError(e.to_string()))
+        .map_err(|e| ProtocolError::IoError(e.to_string()))
 }
 
 pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, ProtocolError> {
@@ -65,18 +68,18 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
     stream
         .read_exact(&mut buf)
         .await
-        .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+        .map_err(|e| ProtocolError::IoError(e.to_string()))?;
 
     let command = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let direction = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let direction = u32::from_be_bytes([buf[DIRECTION_OFFSET], buf[DIRECTION_OFFSET + 1], buf[DIRECTION_OFFSET + 2], buf[DIRECTION_OFFSET + 3]]);
 
     let payload_len = match command {
         constants::CMD_SUBMIT => {
             let tfl = i32::from_be_bytes([
-                buf[basic_size + 4],
-                buf[basic_size + 5],
-                buf[basic_size + 6],
-                buf[basic_size + 7],
+                buf[TFL_OFFSET],
+                buf[TFL_OFFSET + 1],
+                buf[TFL_OFFSET + 2],
+                buf[TFL_OFFSET + 3],
             ]);
             if tfl > 0 && direction == constants::USBIP_DIR_OUT {
                 tfl as usize
@@ -99,7 +102,7 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
         stream
             .read_exact(&mut payload)
             .await
-            .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+            .map_err(|e| ProtocolError::IoError(e.to_string()))?;
         buf.extend_from_slice(&payload);
     }
 
@@ -107,12 +110,14 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
 
     match header.base.command {
         constants::CMD_SUBMIT => {
-            let cmd = unsafe { header.u.cmd_submit };
+            let cmd = header.cmd_submit().ok_or_else(|| {
+                ProtocolError::EncodingError("CMD_SUBMIT header missing cmd_submit data".into())
+            })?;
             if cmd.number_of_packets != 0 {
                 return Err(ProtocolError::IsochronousNotSupported);
             }
             let echo_payload = payload.as_deref();
-            let echo_len = echo_payload.map(|p| i32::try_from(p.len()).unwrap_or(0)).unwrap_or(0);
+            let echo_len = i32::try_from(echo_payload.map(|p| p.len()).unwrap_or(0)).unwrap_or(0);
             let reply = UsbipHeader {
                 base: UsbipHeaderBasic {
                     command: constants::RET_SUBMIT,
@@ -136,7 +141,7 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
             stream
                 .write_all(&encoded)
                 .await
-                .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+                .map_err(|e| ProtocolError::IoError(e.to_string()))?;
         }
         constants::CMD_UNLINK => {
             let reply = UsbipHeader {
@@ -158,7 +163,7 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
             stream
                 .write_all(&encoded)
                 .await
-                .map_err(|e| ProtocolError::EncodingError(e.to_string()))?;
+                .map_err(|e| ProtocolError::IoError(e.to_string()))?;
         }
         _ => {
             return Err(ProtocolError::InvalidCommand {

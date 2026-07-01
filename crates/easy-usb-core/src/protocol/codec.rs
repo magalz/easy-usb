@@ -29,6 +29,9 @@ pub enum ProtocolError {
 
     #[error("encoding error: {0}")]
     EncodingError(String),
+
+    #[error("I/O error: {0}")]
+    IoError(String),
 }
 
 pub(crate) const MAX_PAYLOAD_SIZE: usize = 1_048_576;
