@@ -345,7 +345,11 @@ mod tests {
         let mut rx = registry.snapshot();
         let dev = make_device("1-1", 0x1234, 0x5678);
 
-        registry.handle().send(RegistryCommand::AddDevice(dev.clone())).await.unwrap();
+        registry
+            .handle()
+            .send(RegistryCommand::AddDevice(dev.clone()))
+            .await
+            .unwrap();
 
         let found = wait_for(&mut rx, |s| s.devices.contains_key(&busid("1-1"))).await;
         assert!(found, "device should appear in snapshot");
@@ -430,7 +434,9 @@ mod tests {
             .unwrap();
 
         let transitioned = wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
         assert!(transitioned, "device should transition to Bound");
@@ -451,7 +457,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -474,10 +482,7 @@ mod tests {
 
         let snap = rx.borrow();
         let fwd = snap.forwardings.get(&session_id("s1")).unwrap();
-        assert!(
-            fwd.contains(&busid("1-1")),
-            "forwardings[s1] should contain busid 1-1"
-        );
+        assert!(fwd.contains(&busid("1-1")), "forwardings[s1] should contain busid 1-1");
     }
 
     #[tokio::test]
@@ -495,7 +500,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -521,13 +528,18 @@ mod tests {
             .unwrap();
 
         let back_to_idle = wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Idle)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Idle)
         })
         .await;
         assert!(back_to_idle, "device should return to Idle");
 
         let snap = rx.borrow();
-        let fwd_empty = snap.forwardings.get(&session_id("s1")).is_none_or(|buses| buses.is_empty());
+        let fwd_empty = snap
+            .forwardings
+            .get(&session_id("s1"))
+            .is_none_or(|buses| buses.is_empty());
         assert!(fwd_empty, "forwardings for s1 should be empty");
     }
 
@@ -546,7 +558,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -571,12 +585,17 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Idle)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Idle)
         })
         .await;
 
         let snap = rx.borrow();
-        let fwd_empty = snap.forwardings.get(&session_id("s1")).is_none_or(|buses| buses.is_empty());
+        let fwd_empty = snap
+            .forwardings
+            .get(&session_id("s1"))
+            .is_none_or(|buses| buses.is_empty());
         assert!(fwd_empty, "forwardings should be cleaned up after cycle");
     }
 
@@ -634,8 +653,12 @@ mod tests {
                     let busid_str = format!("{}-{}", i, j);
                     let dev = make_device(&busid_str, 0x1000 + i as u16, 0x2000 + j as u16);
                     let _ = h.send(RegistryCommand::AddDevice(dev)).await;
-                    let _ = h.send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Bound)).await;
-                    let _ = h.send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Idle)).await;
+                    let _ = h
+                        .send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Bound))
+                        .await;
+                    let _ = h
+                        .send(RegistryCommand::TransitionState(busid(&busid_str), DeviceState::Idle))
+                        .await;
                 }
             }));
         }
@@ -737,7 +760,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -758,7 +783,10 @@ mod tests {
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Disconnected))
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Disconnected,
+            ))
             .await
             .unwrap();
 
@@ -772,7 +800,9 @@ mod tests {
 
         let snap = rx.borrow();
         assert!(
-            snap.forwardings.get(&session_id("s1")).is_none_or(|buses| buses.is_empty()),
+            snap.forwardings
+                .get(&session_id("s1"))
+                .is_none_or(|buses| buses.is_empty()),
             "s1 should be removed from forwardings after disconnect"
         );
     }
@@ -808,7 +838,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -855,7 +887,10 @@ mod tests {
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Disconnected))
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Disconnected,
+            ))
             .await
             .unwrap();
 
@@ -883,13 +918,18 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Disconnected))
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Disconnected,
+            ))
             .await
             .unwrap();
 
@@ -913,7 +953,10 @@ mod tests {
 
         registry
             .handle()
-            .send(RegistryCommand::TransitionState(busid("1-1"), DeviceState::Disconnected))
+            .send(RegistryCommand::TransitionState(
+                busid("1-1"),
+                DeviceState::Disconnected,
+            ))
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
@@ -1016,7 +1059,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -1050,7 +1095,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&mut rx, |s| {
-            s.devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound)
+            s.devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
         })
         .await;
 
@@ -1120,12 +1167,20 @@ mod tests {
                 break;
             }
             transition_count += 1;
-            if snapshot_rx.borrow().devices.get(&busid("1-1")).is_some_and(|e| e.state == DeviceState::Bound) {
+            if snapshot_rx
+                .borrow()
+                .devices
+                .get(&busid("1-1"))
+                .is_some_and(|e| e.state == DeviceState::Bound)
+            {
                 break;
             }
         }
 
-        assert!(transition_count > 0, "at least one snapshot transition should be delivered");
+        assert!(
+            transition_count > 0,
+            "at least one snapshot transition should be delivered"
+        );
         assert!(
             transition_count <= 3,
             "should not receive excessive transitions for a single command, got {transition_count}"

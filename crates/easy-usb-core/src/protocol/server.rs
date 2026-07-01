@@ -71,7 +71,12 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
         .map_err(|e| ProtocolError::IoError(e.to_string()))?;
 
     let command = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let direction = u32::from_be_bytes([buf[DIRECTION_OFFSET], buf[DIRECTION_OFFSET + 1], buf[DIRECTION_OFFSET + 2], buf[DIRECTION_OFFSET + 3]]);
+    let direction = u32::from_be_bytes([
+        buf[DIRECTION_OFFSET],
+        buf[DIRECTION_OFFSET + 1],
+        buf[DIRECTION_OFFSET + 2],
+        buf[DIRECTION_OFFSET + 3],
+    ]);
 
     let payload_len = match command {
         constants::CMD_SUBMIT => {
@@ -110,9 +115,9 @@ pub async fn serve_urb_echo(stream: &mut TcpStream) -> Result<UsbipHeader, Proto
 
     match header.base.command {
         constants::CMD_SUBMIT => {
-            let cmd = header.cmd_submit().ok_or_else(|| {
-                ProtocolError::EncodingError("CMD_SUBMIT header missing cmd_submit data".into())
-            })?;
+            let cmd = header
+                .cmd_submit()
+                .ok_or_else(|| ProtocolError::EncodingError("CMD_SUBMIT header missing cmd_submit data".into()))?;
             if cmd.number_of_packets != 0 {
                 return Err(ProtocolError::IsochronousNotSupported);
             }

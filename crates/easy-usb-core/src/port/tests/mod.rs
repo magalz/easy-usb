@@ -403,7 +403,9 @@ fn domain_types_derive_debug_clone_eq() {
     let dev2 = dev.clone();
     assert_eq!(dev, dev2);
 
-    let event = UsbEvent::Connected { device: make_device("1-1", 1, 2) };
+    let event = UsbEvent::Connected {
+        device: make_device("1-1", 1, 2),
+    };
     let event2 = event.clone();
     assert_eq!(event, event2);
 
