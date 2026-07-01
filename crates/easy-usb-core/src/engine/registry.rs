@@ -83,8 +83,6 @@ pub enum RegistryCommand {
 pub enum RegistryError {
     #[error("channel closed")]
     ChannelClosed,
-    #[error("channel full")]
-    ChannelFull,
 }
 
 #[derive(Clone)]
@@ -1185,5 +1183,89 @@ mod tests {
             transition_count <= 3,
             "should not receive excessive transitions for a single command, got {transition_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_channel_backpressure_prevents_unbounded_growth() {
+        let registry = DeviceRegistry::with_capacity(1);
+        let handle = registry.handle().clone();
+
+        let dev1 = make_device("1-1", 0x1234, 0x5678);
+        let dev2 = make_device("2-2", 0xAAAA, 0xBBBB);
+        let dev3 = make_device("3-3", 0xCCCC, 0xDDDD);
+
+        // Fill the single-slot buffer synchronously before consumer can drain
+        // tokio::sync::mpsc send().await blocks when full, providing backpressure
+        let t1 = handle.send(RegistryCommand::AddDevice(dev1)).await;
+        assert!(t1.is_ok(), "first send should succeed");
+
+        // Send blocks until consumer drains — spawn it so we can observe
+        let handle2 = handle.clone();
+        let jh = tokio::spawn(async move {
+            handle2.send(RegistryCommand::AddDevice(dev2)).await
+        });
+
+        // Consumer will drain the first item, unblocking the second send
+        let mut rx = registry.snapshot();
+        let both_present = wait_for(&mut rx, |s| s.devices.len() >= 2).await;
+        assert!(both_present, "both devices should be registered after backpressure resolves");
+
+        let t2_result = timeout(Duration::from_secs(2), jh).await.unwrap().unwrap();
+        assert!(t2_result.is_ok(), "second send should succeed after consumer drains");
+
+        // Third send — regular backpressure behavior
+        let t3 = handle.send(RegistryCommand::AddDevice(dev3)).await;
+        assert!(t3.is_ok(), "third send should succeed");
+    }
+
+    #[test]
+    fn session_id_hash_and_ord() {
+        let a = session_id("a");
+        let b = session_id("b");
+        let a2 = session_id("a");
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+        assert!(a < b);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&a2));
+        assert!(!set.contains(&b));
+    }
+
+    #[test]
+    fn bus_id_hash_and_ord() {
+        let a = busid("1-1");
+        let b = busid("2-2");
+        let a2 = busid("1-1");
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+        assert!(a < b);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&a2));
+        assert!(!set.contains(&b));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_pending_commands_before_stop() {
+        let registry = DeviceRegistry::with_capacity(8);
+        let handle = registry.handle().clone();
+
+        for i in 0..4 {
+            let busid_str = format!("{}-{}", i, i);
+            let dev = make_device(&busid_str, 0x1000 + i as u16, 0x2000 + i as u16);
+            handle.send(RegistryCommand::AddDevice(dev)).await.unwrap();
+        }
+
+        registry.shutdown().await;
+
+        let result = handle
+            .send(RegistryCommand::AddDevice(make_device("99-99", 0x9999, 0x9999)))
+            .await;
+        assert!(matches!(result, Err(RegistryError::ChannelClosed)));
     }
 }

@@ -277,6 +277,10 @@ mod tests {
 
         assert_eq!(session.devid(), 3);
         assert_eq!(session.busid(), "1-1.2.3");
+        assert_eq!(session.reply().status, 0);
+        assert_eq!(session.reply().busnum, 1);
+        assert_eq!(session.reply().devnum, 3);
+        assert_eq!(session.reply().speed, 3);
 
         server.await.unwrap();
         session.close().await;

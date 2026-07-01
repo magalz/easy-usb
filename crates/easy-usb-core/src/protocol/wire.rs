@@ -243,4 +243,74 @@ mod tests {
         assert_eq!(constants::RET_SUBMIT, 0x0003u32);
         assert_eq!(constants::RET_UNLINK, 0x0004u32);
     }
+
+    #[test]
+    fn safe_accessors_return_none_for_wrong_command() {
+        use crate::protocol::wire::UsbipHeader as H;
+        use crate::protocol::wire::UsbipHeaderBasic as B;
+        use crate::protocol::wire::UsbipHeaderCmdSubmit as Cmd;
+        use crate::protocol::wire::UsbipHeaderUnion as U;
+
+        let header = H {
+            base: B {
+                command: constants::CMD_SUBMIT,
+                seqnum: 0,
+                devid: 0,
+                direction: constants::USBIP_DIR_IN,
+                ep: 0x81,
+            },
+            u: U {
+                cmd_submit: Cmd {
+                    transfer_flags: 0,
+                    transfer_buffer_length: 0,
+                    start_frame: 0,
+                    number_of_packets: 0,
+                    interval: 0,
+                    setup: [0u8; 8],
+                },
+            },
+        };
+
+        assert!(header.cmd_submit().is_some());
+        assert!(header.ret_submit().is_none());
+        assert!(header.cmd_unlink().is_none());
+        assert!(header.ret_unlink().is_none());
+    }
+
+    #[test]
+    fn safe_accessor_matches_all_commands() {
+        use crate::protocol::wire::UsbipHeader as H;
+        use crate::protocol::wire::UsbipHeaderBasic as B;
+        use crate::protocol::wire::UsbipHeaderUnion as U;
+
+        let test_cases = [
+            (constants::CMD_SUBMIT, "cmd_submit"),
+            (constants::RET_SUBMIT, "ret_submit"),
+            (constants::CMD_UNLINK, "cmd_unlink"),
+            (constants::RET_UNLINK, "ret_unlink"),
+        ];
+
+        for (command, name) in test_cases {
+            let header = H {
+                base: B {
+                    command,
+                    seqnum: 0,
+                    devid: 0,
+                    direction: 0,
+                    ep: 0,
+                },
+                u: U {
+                    cmd_submit: unsafe { std::mem::zeroed() },
+                },
+            };
+
+            match name {
+                "cmd_submit" => assert!(header.cmd_submit().is_some(), "cmd_submit for CMD_SUBMIT"),
+                "ret_submit" => assert!(header.ret_submit().is_some(), "ret_submit for RET_SUBMIT"),
+                "cmd_unlink" => assert!(header.cmd_unlink().is_some(), "cmd_unlink for CMD_UNLINK"),
+                "ret_unlink" => assert!(header.ret_unlink().is_some(), "ret_unlink for RET_UNLINK"),
+                _ => unreachable!(),
+            }
+        }
+    }
 }

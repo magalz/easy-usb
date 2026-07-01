@@ -845,4 +845,13 @@ mod tests {
         let result = encode_header(&header, None);
         assert!(matches!(result, Err(ProtocolError::IsochronousNotSupported)));
     }
+
+    #[test]
+    fn io_error_partial_eq_and_display() {
+        let err = ProtocolError::IoError("connection reset".into());
+        assert_eq!(err.to_string(), "I/O error: connection reset");
+        assert_eq!(err, ProtocolError::IoError("connection reset".into()));
+        assert_ne!(err, ProtocolError::EncodingError("different".into()));
+        assert_ne!(err, ProtocolError::IsochronousNotSupported);
+    }
 }
