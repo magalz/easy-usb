@@ -82,6 +82,30 @@ jobs:
       - name: License and advisory audit
         run: cargo deny check --config .github/cargo-deny.toml advisories licenses
 
+  interop:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Docker Compose
+        run: docker compose -f docker/docker-compose.yml up --build -d
+
+      - name: Run interop tests
+        run: USBIP_DOCKER_INTEROP=1 cargo test -p easy-usb-core --test interop -- --ignored
+        env:
+          RUST_LOG: info
+
+      - name: Tear down Docker
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -t 5
+
   coverage:
     runs-on: ubuntu-latest
     steps:

@@ -434,8 +434,7 @@ fn domain_types_derive_debug_clone_eq() {
 
 #[test]
 fn no_platform_crates_in_core_deps() {
-    let cargo_toml =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+    let cargo_toml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
     let forbidden = ["windows-rs", "nix", "jni"];
     for crate_name in forbidden {
         assert!(
