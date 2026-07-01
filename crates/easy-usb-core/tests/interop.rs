@@ -20,7 +20,9 @@ fn docker_available() -> bool {
 }
 
 fn container_already_running() -> bool {
-    std::env::var("EASY_USB_CONTAINER_READY").map(|v| v == "1").unwrap_or(false)
+    std::env::var("EASY_USB_CONTAINER_READY")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 fn skip_if_no_docker() {
@@ -128,9 +130,7 @@ async fn interop_client_against_reference_usbipd() {
 
     docker_compose_up().await.expect("docker compose up");
     let usbipd_addr: SocketAddr = ([127, 0, 0, 1], USBIPD_PORT).into();
-    ensure_usbipd_ready(usbipd_addr)
-        .await
-        .expect("usbipd should be ready");
+    ensure_usbipd_ready(usbipd_addr).await.expect("usbipd should be ready");
 
     // Import the virtual test device
     let busid = "1-1";
