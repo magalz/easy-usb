@@ -85,6 +85,7 @@ jobs:
   interop:
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -98,7 +99,7 @@ jobs:
         run: docker compose -f docker/docker-compose.yml up --build -d
 
       - name: Run interop tests
-        run: USBIP_DOCKER_INTEROP=1 cargo test -p easy-usb-core --test interop -- --ignored
+        run: USBIP_DOCKER_INTEROP=1 EASY_USB_CONTAINER_READY=1 cargo test -p easy-usb-core --test interop -- --ignored --test-threads 1
         env:
           RUST_LOG: info
 

@@ -19,6 +19,10 @@ fn docker_available() -> bool {
     std::env::var("USBIP_DOCKER_INTEROP").map(|v| v == "1").unwrap_or(false)
 }
 
+fn container_already_running() -> bool {
+    std::env::var("EASY_USB_CONTAINER_READY").map(|v| v == "1").unwrap_or(false)
+}
+
 fn skip_if_no_docker() {
     if !docker_available() {
         eprintln!(
@@ -65,6 +69,9 @@ async fn wait_for_usbipd(addr: SocketAddr, timeout: Duration) -> Result<(), Stri
 }
 
 async fn docker_compose_up() -> Result<(), String> {
+    if container_already_running() {
+        return Ok(());
+    }
     let output = Command::new("docker")
         .args(["compose", "-f", "docker/docker-compose.yml", "up", "--build", "-d"])
         .current_dir(WORKSPACE_ROOT)
@@ -79,6 +86,9 @@ async fn docker_compose_up() -> Result<(), String> {
 }
 
 async fn docker_compose_down() {
+    if container_already_running() {
+        return;
+    }
     let _ = Command::new("docker")
         .args(["compose", "-f", "docker/docker-compose.yml", "down", "-t", "5"])
         .current_dir(WORKSPACE_ROOT)
